@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+venv/
+.venv/
+telemetry.db
+.DS_Store
+*.egg-info/
