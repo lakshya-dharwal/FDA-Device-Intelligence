@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+anthropic
+mcp
+httpx
+streamlit
+pandas
+plotly
+python-dotenv
+requests
+pydantic
