@@ -1,8 +1,20 @@
+# Secrets & environment
 .env
+
+# Python
 __pycache__/
 *.pyc
 venv/
 .venv/
-telemetry.db
-.DS_Store
 *.egg-info/
+
+# Telemetry (local SQLite store)
+telemetry.db
+
+# Test & coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
