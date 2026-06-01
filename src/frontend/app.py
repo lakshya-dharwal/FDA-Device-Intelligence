@@ -4,13 +4,17 @@ Streamlit frontend — two tabs:
   2. Analytics : charts and table from the /metrics and /history endpoints
 """
 
-import streamlit as st
-import requests
-import pandas as pd
-import plotly.express as px
+import os
 from collections import Counter
 
-BACKEND = "http://localhost:8000"
+import pandas as pd
+import plotly.express as px
+import requests
+import streamlit as st
+
+# Backend URL is configurable so the same app points at localhost in dev and
+# a Cloud Run URL in production. Set FDA_API_URL in the environment to override.
+BACKEND = os.getenv("FDA_API_URL", "http://localhost:8000")
 
 EXAMPLE_QUESTIONS = [
     "What are recent Class I recalls for infusion pumps?",
