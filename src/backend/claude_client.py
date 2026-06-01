@@ -2,30 +2,32 @@
 Claude agentic loop — sends user queries to Claude with FDA tool definitions,
 then executes any tool calls Claude requests against the real OpenFDA API,
 feeding results back until Claude produces a final answer.
+
+The loop is bounded by `settings.max_agent_iterations` so a misbehaving model
+can never run up unbounded API cost.
 """
 
-import os
+from __future__ import annotations
+
 import time
-import sys
-from dotenv import load_dotenv
+from typing import Any
+
 import anthropic
 
-# Make sure the project root is on the path so we can import sibling packages
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
+from src.config import settings
+from src.logging_config import get_logger
 from src.mcp_server.fda_tools import (
-    search_device_recalls,
     get_adverse_events,
     get_device_classifications,
+    search_device_recalls,
 )
 
-load_dotenv()
+logger = get_logger(__name__)
 
-# Pricing constants for claude-sonnet-4-5 (per million tokens)
-INPUT_COST_PER_MTOK = 3.00
-OUTPUT_COST_PER_MTOK = 15.00
 
-client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+class ClaudeClientError(RuntimeError):
+    """Raised when the agentic loop cannot complete (auth, billing, API errors)."""
+
 
 SYSTEM_PROMPT = """You are an FDA Device Intelligence Assistant. You help clinicians,
 researchers, and regulators understand FDA medical device safety data including recalls,
@@ -34,8 +36,8 @@ provided tools to fetch real, up-to-date FDA data rather than relying on your tr
 data. Be precise, cite the data you retrieved, and present findings in a structured,
 clinically useful format."""
 
-# Tool definitions in Anthropic tool_use format
-TOOLS = [
+# Tool definitions in Anthropic tool_use format.
+TOOLS: list[dict[str, Any]] = [
     {
         "name": "search_device_recalls",
         "description": (
@@ -100,84 +102,133 @@ TOOLS = [
     },
 ]
 
-# Map tool names Claude will call → actual Python functions
+# Map tool names Claude will call → actual Python functions.
 TOOL_MAP = {
     "search_device_recalls": search_device_recalls,
     "get_adverse_events": get_adverse_events,
     "get_device_classifications": get_device_classifications,
 }
 
+# Cached Anthropic client so we don't rebuild it on every request.
+_client: anthropic.Anthropic | None = None
 
-def run_fda_query(query: str) -> dict:
+
+def get_client() -> anthropic.Anthropic:
+    """
+    Return a cached Anthropic client, constructing it on first use.
+
+    Raises ClaudeClientError with a clear message if no API key is configured,
+    rather than failing deep inside the SDK at call time.
+    """
+    global _client
+    if not settings.has_anthropic_key:
+        raise ClaudeClientError(
+            "ANTHROPIC_API_KEY is not set. Add it to your .env file."
+        )
+    if _client is None:
+        _client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    return _client
+
+
+def _extract_text(content: list) -> str:
+    """Concatenate all text blocks from a Claude response into a single string."""
+    return "".join(getattr(block, "text", "") for block in content if getattr(block, "text", ""))
+
+
+def _calc_cost(input_tokens: int, output_tokens: int) -> float:
+    """Estimate USD cost from token counts using configured per-MTok pricing."""
+    return (
+        (input_tokens / 1_000_000) * settings.input_cost_per_mtok
+        + (output_tokens / 1_000_000) * settings.output_cost_per_mtok
+    )
+
+
+def run_fda_query(query: str, client: anthropic.Anthropic | None = None) -> dict:
     """
     Run an agentic Claude query against the FDA tools.
 
-    Returns a dict with:
-      answer        - final text response from Claude
-      tools_called  - list of tool names that were invoked
-      input_tokens  - cumulative input tokens across all API calls
-      output_tokens - cumulative output tokens across all API calls
-      cost_usd      - estimated cost
-      latency_ms    - wall-clock time in milliseconds
+    Args:
+        query: The user's natural-language question.
+        client: Optional Anthropic client (injected in tests); defaults to the
+            cached process client from get_client().
+
+    Returns a dict with: answer, tools_called, input_tokens, output_tokens,
+    cost_usd, latency_ms.
+
+    Raises:
+        ClaudeClientError: if the Anthropic API call fails (auth, billing,
+            rate limit, overload) or the loop exceeds max_agent_iterations.
     """
+    client = client or get_client()
     start_time = time.time()
 
-    messages = [{"role": "user", "content": query}]
-    tools_called = []
+    messages: list[dict[str, Any]] = [{"role": "user", "content": query}]
+    tools_called: list[str] = []
     total_input_tokens = 0
     total_output_tokens = 0
+    final_text = ""
 
-    # Agentic loop: keep calling Claude until it stops requesting tool use
-    while True:
-        response = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=4096,
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
-            messages=messages,
-        )
+    # Agentic loop, bounded so a tool-use storm can't run forever.
+    for iteration in range(settings.max_agent_iterations):
+        try:
+            response = client.messages.create(
+                model=settings.claude_model,
+                max_tokens=settings.max_tokens,
+                system=SYSTEM_PROMPT,
+                tools=TOOLS,
+                messages=messages,
+            )
+        except anthropic.APIStatusError as exc:
+            # Auth, billing, rate-limit, overload, etc. — surface a clean message.
+            logger.error("Anthropic API error (status %s): %s", exc.status_code, exc)
+            raise ClaudeClientError(
+                f"Anthropic API error ({exc.status_code}): {exc.message}"
+            ) from exc
+        except anthropic.APIError as exc:
+            logger.error("Anthropic API error: %s", exc)
+            raise ClaudeClientError(f"Anthropic API error: {exc}") from exc
 
         total_input_tokens += response.usage.input_tokens
         total_output_tokens += response.usage.output_tokens
 
-        # Append Claude's response to the conversation
+        # Record Claude's turn in the running conversation.
         messages.append({"role": "assistant", "content": response.content})
 
         if response.stop_reason != "tool_use":
-            # Claude is done — extract the final text answer
-            final_text = ""
-            for block in response.content:
-                if hasattr(block, "text"):
-                    final_text += block.text
+            final_text = _extract_text(response.content)
             break
 
-        # Claude wants to call one or more tools — execute them all
+        # Claude requested one or more tools — execute them all and feed back.
         tool_results = []
         for block in response.content:
-            if block.type == "tool_use":
-                tool_name = block.name
-                tool_input = block.input
-                tools_called.append(tool_name)
+            if getattr(block, "type", None) != "tool_use":
+                continue
+            tools_called.append(block.name)
+            fn = TOOL_MAP.get(block.name)
+            try:
+                result_text = fn(**block.input) if fn else f"Unknown tool: {block.name}"
+            except Exception as exc:  # tool execution shouldn't kill the loop
+                logger.exception("Tool %s raised", block.name)
+                result_text = f"Tool '{block.name}' failed: {exc}"
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": result_text,
+            })
 
-                fn = TOOL_MAP.get(tool_name)
-                if fn:
-                    result_text = fn(**tool_input)
-                else:
-                    result_text = f"Unknown tool: {tool_name}"
-
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": result_text,
-                })
-
-        # Feed tool results back to Claude
         messages.append({"role": "user", "content": tool_results})
+    else:
+        # Loop exhausted without a final answer.
+        logger.error("Agentic loop hit max_agent_iterations=%s", settings.max_agent_iterations)
+        raise ClaudeClientError(
+            f"Query exceeded the maximum of {settings.max_agent_iterations} tool-use rounds."
+        )
 
     latency_ms = (time.time() - start_time) * 1000
-    cost_usd = (
-        (total_input_tokens / 1_000_000) * INPUT_COST_PER_MTOK
-        + (total_output_tokens / 1_000_000) * OUTPUT_COST_PER_MTOK
+    cost_usd = _calc_cost(total_input_tokens, total_output_tokens)
+    logger.info(
+        "Query complete: tools=%s, tokens=%s/%s, cost=$%.5f, latency=%.0fms",
+        tools_called, total_input_tokens, total_output_tokens, cost_usd, latency_ms,
     )
 
     return {
