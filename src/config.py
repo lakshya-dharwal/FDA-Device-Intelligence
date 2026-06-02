@@ -65,8 +65,16 @@ class Settings:
     openfda_timeout: float = field(default_factory=lambda: _get_float("OPENFDA_TIMEOUT", 10.0))
 
     # ── Telemetry (SQLite in V1; Firestore is the V2 swap target) ─────────
+    # Backend selector: "sqlite" (local/dev/test) or "firestore" (Cloud Run).
+    telemetry_backend: str = field(
+        default_factory=lambda: os.getenv("TELEMETRY_BACKEND", "sqlite").lower()
+    )
     db_path: str = field(
         default_factory=lambda: os.getenv("TELEMETRY_DB_PATH", os.path.join(_PROJECT_ROOT, "telemetry.db"))
+    )
+    # Firestore collection name used when telemetry_backend == "firestore".
+    firestore_collection: str = field(
+        default_factory=lambda: os.getenv("FIRESTORE_COLLECTION", "queries")
     )
 
     # ── Frontend → backend wiring ─────────────────────────────────────────

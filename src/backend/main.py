@@ -14,10 +14,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from src.backend.claude_client import ClaudeClientError, run_fda_query
-from src.backend.telemetry import get_all_queries, get_metrics, init_db, log_query
+from src.config import settings
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+# Select the telemetry backend at startup. SQLite is the default for local dev
+# and tests; Firestore activates when TELEMETRY_BACKEND=firestore (Cloud Run).
+if settings.telemetry_backend == "firestore":
+    from src.backend import telemetry_firestore as telemetry
+else:
+    from src.backend import telemetry
+
+init_db = telemetry.init_db
+log_query = telemetry.log_query
+get_all_queries = telemetry.get_all_queries
+get_metrics = telemetry.get_metrics
 
 # Query length guard rails, applied by the Pydantic model below.
 MIN_QUERY_LEN = 3
@@ -28,7 +40,10 @@ MAX_QUERY_LEN = 500
 async def lifespan(app: FastAPI):
     """Initialise the telemetry DB on startup (replaces deprecated on_event)."""
     init_db()
-    logger.info("FDA Device Intelligence API started")
+    logger.info(
+        "FDA Device Intelligence API started (telemetry backend: %s)",
+        settings.telemetry_backend,
+    )
     yield
     logger.info("FDA Device Intelligence API shutting down")
 
