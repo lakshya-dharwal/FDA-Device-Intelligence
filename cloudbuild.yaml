@@ -1,0 +1,47 @@
+# GCP Cloud Build pipeline: build the API image, push it, and deploy to Cloud Run.
+# Trigger manually with:  gcloud builds submit --config cloudbuild.yaml
+#
+# Substitutions (override with --substitutions):
+#   _REGION       deploy region (default us-central1)
+#   _SERVICE      Cloud Run service name (default fda-device-intelligence)
+#   _SECRET       Secret Manager secret holding the Anthropic key (default anthropic-api-key)
+
+substitutions:
+  _REGION: us-central1
+  _SERVICE: fda-device-intelligence
+  _SECRET: anthropic-api-key
+
+steps:
+  # 1. Build the container image, tagged with the commit SHA.
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - gcr.io/$PROJECT_ID/${_SERVICE}:$SHORT_SHA
+      - .
+
+  # 2. Push the image to Container Registry.
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - gcr.io/$PROJECT_ID/${_SERVICE}:$SHORT_SHA
+
+  # 3. Deploy to Cloud Run with Firestore telemetry and the API key from Secret Manager.
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=gcr.io/$PROJECT_ID/${_SERVICE}:$SHORT_SHA
+      - --region=${_REGION}
+      - --platform=managed
+      - --allow-unauthenticated
+      - --set-env-vars=TELEMETRY_BACKEND=firestore
+      - --set-secrets=ANTHROPIC_API_KEY=${_SECRET}:latest
+
+images:
+  - gcr.io/$PROJECT_ID/${_SERVICE}:$SHORT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY

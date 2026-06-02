@@ -1,0 +1,26 @@
+# Secrets — never bake into the image
+.env
+
+# Local Python environment & caches
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Local telemetry store (Cloud Run uses Firestore)
+telemetry.db
+
+# Tests & coverage artifacts (not needed in the runtime image)
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Version control & docs
+.git/
+.gitignore
+*.md
+
+# Frontend runs separately, not in the API image
+src/frontend/
