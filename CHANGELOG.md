@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — V2 (Cloud Deployment)
+- **Pluggable telemetry backend**: `TELEMETRY_BACKEND` selects `sqlite`
+  (local/dev/test, default) or `firestore` (Cloud Run). SQLite and Firestore
+  modules share one public API; `main.py` binds the chosen backend at startup.
+- **Firestore backend** (`telemetry_firestore.py`): mirrors the SQLite API,
+  lazy firebase-admin import, Application Default Credentials auth, graceful
+  degradation, and Python-side metric aggregation.
+- **Containerization**: `Dockerfile` (python:3.11-slim, uvicorn on `$PORT`),
+  `.dockerignore`, and `cloudbuild.yaml` (build → push → deploy to Cloud Run
+  with Firestore + the Anthropic key from Secret Manager).
+- **Deployment docs** in the README: API enablement, Firestore creation,
+  Secret Manager + IAM setup, one-command Cloud Build deploy, and pointing the
+  frontend at the Cloud Run URL.
+- New config: `FIRESTORE_COLLECTION`; new tests for the Firestore backend
+  (42 tests total).
+
 ### Added
 - **Central configuration** (`src/config.py`): immutable, env-driven `Settings`
   singleton for the Anthropic model/tokens/pricing, agentic iteration cap,

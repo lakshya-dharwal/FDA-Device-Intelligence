@@ -163,15 +163,75 @@ All settings are environment-driven (see `.env.example`). Key knobs:
 | `CLAUDE_MODEL`         | `claude-sonnet-4-5`  | Model id                                  |
 | `MAX_AGENT_ITERATIONS` | `10`                 | Cost guard rail — max tool-use rounds     |
 | `OPENFDA_TIMEOUT`      | `10`                 | Per-request OpenFDA timeout (seconds)     |
+| `TELEMETRY_BACKEND`    | `sqlite`             | Telemetry store: `sqlite` or `firestore`  |
+| `FIRESTORE_COLLECTION` | `queries`            | Firestore collection (firestore backend)  |
 | `FDA_API_URL`          | `http://localhost:8000` | Backend URL the frontend calls         |
 | `LOG_LEVEL`            | `INFO`               | Logging verbosity                         |
+
+---
+
+## Deploy to GCP Cloud Run (V2)
+
+The backend ships as a container and runs on Cloud Run with **Firestore**
+telemetry and the Anthropic key sourced from **Secret Manager**. Telemetry is
+pluggable: `TELEMETRY_BACKEND=sqlite` locally, `firestore` in the cloud — the
+`telemetry.py` / `telemetry_firestore.py` modules share one public API.
+
+### One-time setup
+```bash
+# Set your project and enable the required APIs
+gcloud config set project YOUR_PROJECT_ID
+gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
+    firestore.googleapis.com secretmanager.googleapis.com
+
+# Create the Firestore database (Native mode)
+gcloud firestore databases create --location=us-central1
+
+# Store the Anthropic API key as a secret
+echo -n "sk-ant-..." | gcloud secrets create anthropic-api-key --data-file=-
+
+# Let the Cloud Run runtime service account read the secret + use Firestore
+PROJECT_NUMBER=$(gcloud projects describe YOUR_PROJECT_ID --format='value(projectNumber)')
+SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+gcloud secrets add-iam-policy-binding anthropic-api-key \
+    --member="serviceAccount:${SA}" --role="roles/secretmanager.secretAccessor"
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+    --member="serviceAccount:${SA}" --role="roles/datastore.user"
+```
+
+### Deploy (one command, via Cloud Build)
+```bash
+gcloud builds submit --config cloudbuild.yaml
+```
+This builds the image, pushes it, and deploys the `fda-device-intelligence`
+service with `TELEMETRY_BACKEND=firestore` and the key wired from Secret Manager.
+
+### Or build & deploy manually
+```bash
+gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/fda-device-intelligence
+gcloud run deploy fda-device-intelligence \
+    --image gcr.io/YOUR_PROJECT_ID/fda-device-intelligence \
+    --region us-central1 --platform managed --allow-unauthenticated \
+    --set-env-vars TELEMETRY_BACKEND=firestore \
+    --set-secrets ANTHROPIC_API_KEY=anthropic-api-key:latest
+```
+
+### Point the frontend at the deployed API
+```bash
+export FDA_API_URL=https://fda-device-intelligence-xxxxx-uc.a.run.app
+streamlit run src/frontend/app.py
+```
+
+> **Note:** Cloud Run authenticates to Firestore and Secret Manager via the
+> service account's Application Default Credentials — no key file is baked into
+> the image. The container listens on `$PORT` (8080), as Cloud Run requires.
 
 ---
 
 ## Known Limitations
 
 - **OpenFDA data is not real-time.** OpenFDA refreshes periodically and historical coverage varies by endpoint; "recent" reflects the latest published data, not live filings.
-- **Telemetry is local (SQLite) in V1.** It is single-node and not shared across deployments — Firestore lands in V2 (see below).
+- **Telemetry backend is pluggable.** SQLite (default) is single-node and local; Firestore (`TELEMETRY_BACKEND=firestore`) is used on Cloud Run. The Firestore `get_metrics` aggregates in Python by streaming documents — fine at telemetry scale, but large collections would want scheduled rollups.
 - **No authentication or rate limiting yet.** CORS is open (`*`) and there is no per-user throttling; the `MAX_AGENT_ITERATIONS` cap is the only cost guard. Auth + rate limiting are planned.
 - **Cost figures are estimates** computed from token counts and configured pricing, not billed amounts.
 - **Synchronous request path.** A query blocks until Claude finishes its tool-use loop; there is no streaming or async fan-out yet.
@@ -180,8 +240,8 @@ All settings are environment-driven (see `.env.example`). Key knobs:
 
 ## Roadmap
 
-- **V1 (current):** Local platform — bounded agentic loop, SQLite telemetry, Streamlit dashboard, 89% test coverage.
-- **V2 — Cloud:** GCP Cloud Run deployment, Firestore telemetry (the `telemetry.py` public API is the swap boundary), `ANTHROPIC_API_KEY` via Secret Manager, Dockerfile + Cloud Build.
+- **V1 — Local platform:** bounded agentic loop, SQLite telemetry, Streamlit dashboard, full test coverage. ✅
+- **V2 (current) — Cloud:** Dockerfile + Cloud Build + Cloud Run, pluggable Firestore telemetry, `ANTHROPIC_API_KEY` via Secret Manager. ✅
 - **V3 — More tools:** 510(k) submissions, PMA approvals, enforcement actions, registration & listing.
 - **V4 — Analytics:** device-category trends, recall-severity breakdowns, cost projection, CSV export, comparative query mode.
 - **V5 — Governance:** rate limiting, off-topic filtering, response disclaimers, `GOVERNANCE.md`.
