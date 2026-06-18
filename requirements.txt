@@ -3,9 +3,12 @@ uvicorn
 anthropic
 mcp
 httpx
+pytest
 streamlit
 pandas
 plotly
 python-dotenv
 requests
 pydantic
+sqlalchemy
+psycopg[binary]

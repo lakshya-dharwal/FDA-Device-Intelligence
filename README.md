@@ -1,16 +1,16 @@
 # FDA Device Intelligence Platform
 
-A healthcare AI platform where you type a natural-language question about FDA medical device safety and receive an AI-generated answer backed by live, real-time FDA data. Claude (Anthropic API) acts as the intelligence layer — it autonomously decides which FDA data tools to call, fetches the data, and synthesises a clinical-grade answer. Every query is logged with cost, latency, and token usage, and a Streamlit dashboard visualises this telemetry.
+A healthcare AI platform where you type a natural-language question about FDA medical device safety and receive an AI-generated answer backed by live FDA data. Claude (Anthropic API) acts as the intelligence layer, the backend retrieves structured FDA records, and a Streamlit control plane visualizes query output, telemetry, and operational events.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────┐     HTTP POST /query      ┌──────────────────┐
-│  Streamlit  │ ─────────────────────────▶ │  FastAPI Backend  │
-│  Frontend   │ ◀───────────────────────── │  (main.py)        │
-└─────────────┘     answer + telemetry    └────────┬─────────┘
+┌─────────────┐     HTTP(S) /query       ┌──────────────────┐
+│  Streamlit  │ ────────────────────────▶ │  FastAPI Backend  │
+│  Frontend   │ ◀──────────────────────── │  (main.py)        │
+└─────────────┘  answer + metrics/events └────────┬─────────┘
                                                    │
                                           Anthropic SDK
                                                    │
@@ -23,11 +23,11 @@ A healthcare AI platform where you type a natural-language question about FDA me
                                                  │ tool_use calls
                                                  ▼
                                         ┌──────────────────────┐
-                                        │  MCP / FDA Tools      │
+                                        │  Structured FDA Tools │
                                         │  fda_tools.py         │
-                                        │  • search_recalls     │
-                                        │  • get_adverse_events │
-                                        │  • get_classifications│
+                                        │  • normalized search  │
+                                        │  • date filters       │
+                                        │  • ranked results     │
                                         └────────┬─────────────┘
                                                  │ HTTPS GET
                                                  ▼
@@ -36,10 +36,10 @@ A healthcare AI platform where you type a natural-language question about FDA me
                                         │  api.fda.gov          │
                                         └──────────────────────┘
 
-                    Telemetry (every query)
+                    Telemetry + Ops Events
                     ┌──────────────────────┐
-                    │  SQLite telemetry.db  │
-                    │  (V2: GCP Firestore)  │
+                    │  SQLAlchemy Store     │
+                    │  SQLite / Postgres    │
                     └──────────────────────┘
 ```
 
@@ -47,16 +47,16 @@ A healthcare AI platform where you type a natural-language question about FDA me
 
 ## Tech Stack
 
-| Layer       | Technology                         |
-|-------------|-------------------------------------|
-| AI Model    | Claude claude-sonnet-4-5 (Anthropic API) |
-| MCP Tools   | FastMCP (mcp library)               |
-| Backend     | FastAPI + Uvicorn                   |
-| Frontend    | Streamlit                           |
-| Charts      | Plotly                              |
-| Telemetry   | SQLite (V2: GCP Firestore)          |
-| FDA Data    | OpenFDA public REST API (no auth)   |
-| HTTP Client | requests / httpx                    |
+| Layer       | Technology                              |
+|-------------|------------------------------------------|
+| AI Model    | Claude `claude-sonnet-4-5` (Anthropic API) |
+| Backend     | FastAPI + Uvicorn                        |
+| Frontend    | Streamlit                                |
+| Telemetry   | SQLAlchemy with SQLite or Postgres       |
+| Security    | Bearer token auth, trusted hosts, rate limiting |
+| Charts      | Plotly + Pandas                          |
+| FDA Data    | OpenFDA public REST API                  |
+| HTTP Client | `requests` / `httpx`                     |
 
 ---
 
@@ -82,12 +82,13 @@ source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 4. Add your Anthropic API key
+### 4. Add configuration
 
-Create a `.env` file in the project root:
+Copy `.env.example` to `.env` and set at least:
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...your-key-here...
+API_AUTH_TOKEN=change-me
 ```
 
 ### 5. Start the FastAPI backend
@@ -96,7 +97,7 @@ ANTHROPIC_API_KEY=sk-ant-...your-key-here...
 uvicorn src.backend.main:app --reload --port 8000
 ```
 
-The API will be live at `http://localhost:8000`. Docs at `http://localhost:8000/docs`.
+The API will be live at `http://localhost:8000`. The default frontend origin is `http://localhost:8501`.
 
 ### 6. Start the Streamlit frontend (new terminal)
 
@@ -105,6 +106,15 @@ streamlit run src/frontend/app.py
 ```
 
 The dashboard opens at `http://localhost:8501`.
+
+### 7. Local Postgres option
+
+If you want production-like telemetry locally:
+
+```bash
+docker compose up postgres
+export DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/fda_device_intelligence
+```
 
 ---
 
@@ -126,10 +136,46 @@ The dashboard opens at `http://localhost:8501`.
 | POST   | `/query`   | Run a natural-language FDA query         |
 | GET    | `/metrics` | Aggregate telemetry stats                |
 | GET    | `/history` | Full query history (newest first)        |
+| GET    | `/events`  | Recent warning/error telemetry events    |
 
 ---
 
-## Roadmap
+## Security
 
-- **V1 (current):** Local SQLite telemetry, OpenFDA public API, Claude agentic loop
-- **V2 (planned):** GCP Cloud Run deployment, Firestore telemetry, authentication, streaming responses
+- API auth via `Authorization: Bearer <API_AUTH_TOKEN>` or `X-API-Key`
+- CORS allowlist via `CORS_ALLOWED_ORIGINS`
+- Trusted hosts via `TRUSTED_HOSTS`
+- In-memory rate limiting via `RATE_LIMIT_REQUESTS` and `RATE_LIMIT_WINDOW_SECONDS`
+- Request IDs returned in `X-Request-ID`
+
+---
+
+## Deployment
+
+- `Dockerfile.backend` builds the FastAPI service
+- `Dockerfile.frontend` builds the Streamlit service
+- `docker-compose.yml` runs Postgres, backend, and frontend as separate services
+
+Start the full stack with:
+
+```bash
+docker compose up --build
+```
+
+This brings up:
+
+- Postgres on `localhost:5432`
+- Backend on `localhost:8000`
+- Frontend on `localhost:8501`
+
+---
+
+## Frontend
+
+The Streamlit app now includes:
+
+- auth-aware backend requests
+- cached reads for `/metrics`, `/history`, and `/events`
+- structured tool result tables with CSV export
+- filtered analytics views for query history
+- an operations tab for warning/error telemetry
